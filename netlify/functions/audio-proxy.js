@@ -1,28 +1,51 @@
 /**
- * 网易云音乐音频代理 - Netlify Functions 版本
- * 
- * 部署：将此文件放在 netlify/functions/ 目录
- * 访问：https://your-site.netlify.app/.netlify/functions/audio-proxy?song_id=xxx&quality=standard
- * 或配置重写后：https://your-site.netlify.app/audio/xxx?quality=standard
+ * 网易云音乐音频代理 - Netlify Functions 版本（稳定版）
  * 
  * 作用：代理网易云音频URL，让Telegram直接从Netlify下载，减少Render出站流量
- * Netlify免费版：10秒超时，12.5万请求/月，100GB流量/月
+ * 优化：从Upstash读取最新cookie（Bot管理员更新后自动同步），内存缓存60秒
  */
 
 const crypto = require('crypto');
 
 // ============================================================
-// Upstash Redis 配置（从环境变量读取，未配置则使用默认值）
+// 配置
 // ============================================================
+
+// 默认 cookie（Upstash 读取失败时使用）
+const DEFAULT_COOKIE = '00051F8B50B031D47D75138C419DF7B832B7454FEC68CE11935A6FF17E33543308BE6C3EA6689BAD40FFFB5F83B9F73030B0CE8EAB90EEDBE8A7362751F354AB290B5F2FF8C0DAD1FE3675FFCE7FD0C481A0A86A0A61DC5926ED9EA8D896C9330A2A59B281E880AD3066C5E5027695D2F2DD220636C9FE1186CFD84B1E3FBF6FD4D5C77FF8F533E7B2E6B5B3E3E6DCC7957BDA90BE2CDCBEAB4964499330D9C4FDD4E9EC548A8550EA9287E1613E9683B3A8CE3133A48B48D304E4146B4C10C898C7E6CC7539A623D99A823FEBCC8DE5CCFCAB9A75869500602A3B0DF793A7F776CA40AE6C7050A31806F1AC5CE816BC4E950A0DA1DE1EAA136CFDF3C6BAFB45EE58C3BCEE3D997D3764B7BBFD38EE07C562AB9057FCCBAC9749C56A010913A077B941E3A77BB46F39658FD90A7DFB6B3AC57E4C7C6480B1A57150A5E5D4995B2290F57E35CA9B48FFAD2572130007161047CCC5D582BEEBC83E313D296261A32C600D1398A21157C0B9E22F8046B51ADBA6582AA6B28EA505A3017EF7D70DD2EB61CB52C23E087085DC6FD5C0FD50A5594ACFE26B3F094FC3B30402BBA5938DC2';
+
+// Upstash 配置（从环境变量读取，未配置则使用默认值）
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || 'https://normal-sawfly-40098.upstash.io';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || 'AZyiAAIgcDEzM2UyZTZkM2Y2ODY0ZDY5YmM0MjFiYmUxYzEzODM0OA';
 
 // 内存缓存（减少 Upstash 查询次数，缓存 60 秒）
 let cachedCookie = '';
 let cachedCookieTime = 0;
-const CACHE_TTL = 60 * 1000; // 60秒
+const CACHE_TTL = 60 * 1000;
 
-// 从 Upstash 读取最新的 cookie
+// 生成随机 NMTID
+function genNmtid() {
+  return crypto.randomBytes(16).toString('hex');
+}
+const NMTID = genNmtid();
+
+// ============================================================
+// 带超时的 fetch 工具函数
+// ============================================================
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ============================================================
+// 从 Upstash 读取最新 cookie
+// ============================================================
 async function getLatestCookie() {
   const now = Date.now();
   // 如果缓存未过期，直接返回缓存
@@ -31,33 +54,35 @@ async function getLatestCookie() {
   }
   
   try {
-    const response = await fetch(`${UPSTASH_URL}/get/bot:cookie`, {
+    console.log('[Upstash] 开始读取最新 cookie...');
+    const response = await fetchWithTimeout(`${UPSTASH_URL}/get/bot:cookie`, {
       headers: {
         'Authorization': `Bearer ${UPSTASH_TOKEN}`
       }
-    });
+    }, 5000); // 5秒超时
+    
+    if (!response.ok) {
+      console.error(`[Upstash] HTTP 错误: ${response.status}`);
+      return DEFAULT_COOKIE;
+    }
+    
     const data = await response.json();
-    if (data && data.result) {
+    if (data && data.result && typeof data.result === 'string' && data.result.length > 10) {
       cachedCookie = data.result;
       cachedCookieTime = now;
-      console.log('[Upstash] 成功读取最新 cookie，长度:', cachedCookie.length);
+      console.log(`[Upstash] 成功读取最新 cookie，长度: ${cachedCookie.length}`);
       return cachedCookie;
+    } else {
+      console.log('[Upstash] cookie 为空或无效，使用默认 cookie');
+      return DEFAULT_COOKIE;
     }
   } catch (e) {
     console.error('[Upstash] 读取 cookie 失败，使用默认 cookie:', e.message);
+    return DEFAULT_COOKIE;
   }
-  
-  // 读取失败，返回默认 cookie
-  return process.env.NETEASE_COOKIE || '00051F8B50B031D47D75138C419DF7B832B7454FEC68CE11935A6FF17E33543308BE6C3EA6689BAD40FFFB5F83B9F73030B0CE8EAB90EEDBE8A7362751F354AB290B5F2FF8C0DAD1FE3675FFCE7FD0C481A0A86A0A61DC5926ED9EA8D896C9330A2A59B281E880AD3066C5E5027695D2F2DD220636C9FE1186CFD84B1E3FBF6FD4D5C77FF8F533E7B2E6B5B3E3E6DCC7957BDA90BE2CDCBEAB4964499330D9C4FDD4E9EC548A8550EA9287E1613E9683B3A8CE3133A48B48D304E4146B4C10C898C7E6CC7539A623D99A823FEBCC8DE5CCFCAB9A75869500602A3B0DF793A7F776CA40AE6C7050A31806F1AC5CE816BC4E950A0DA1DE1EAA136CFDF3C6BAFB45EE58C3BCEE3D997D3764B7BBFD38EE07C562AB9057FCCBAC9749C56A010913A077B941E3A77BB46F39658FD90A7DFB6B3AC57E4C7C6480B1A57150A5E5D4995B2290F57E35CA9B48FFAD2572130007161047CCC5D582BEEBC83E313D296261A32C600D1398A21157C0B9E22F8046B51ADBA6582AA6B28EA505A3017EF7D70DD2EB61CB52C23E087085DC6FD5C0FD50A5594ACFE26B3F094FC3B30402BBA5938DC2';
 }
 
-// 生成随机 NMTID
-function genNmtid() {
-  return crypto.randomBytes(16).toString('hex');
-}
-const NMTID = genNmtid();
-
-// 构建 Cookie 头（从 Upstash 读取最新 cookie）
+// 构建 Cookie 头
 async function getCookieHeader() {
   const cookie = await getLatestCookie();
   const cookies = [];
@@ -102,13 +127,11 @@ function aesEncrypt(text, key) {
 function rsaEncrypt(text) {
   // 反转文本
   const reversed = text.split('').reverse().join('');
-  // 转十六进制
   const hex = Buffer.from(reversed, 'utf8').toString('hex');
-  // 模幂运算
-  const num = BigInt('0x' + hex);
-  const result = num ** RSA_EXP % RSA_PUB_KEY;
+  let num = BigInt('0x' + hex);
+  num = num.modPow(RSA_EXP, RSA_PUB_KEY);
   // 转256位十六进制字符串
-  return result.toString(16).padStart(256, '0');
+  return num.toString(16).padStart(256, '0');
 }
 
 function weapi(data) {
@@ -136,7 +159,10 @@ async function getSongUrl(songId, quality = 'standard') {
   params.append('encSecKey', data.encSecKey);
   
   const cookieHeader = await getCookieHeader();
-  const response = await fetch(url, {
+  
+  console.log(`[网易云API] 开始获取歌曲直链: songId=${songId}, quality=${quality}`);
+  
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -146,13 +172,21 @@ async function getSongUrl(songId, quality = 'standard') {
       'Origin': 'https://music.163.com'
     },
     body: params.toString()
-  });
+  }, 10000); // 10秒超时
+  
+  if (!response.ok) {
+    console.error(`[网易云API] HTTP 错误: ${response.status}`);
+    return null;
+  }
   
   const result = await response.json();
   
   if (result.data && result.data[0] && result.data[0].url) {
+    console.log(`[网易云API] 成功获取歌曲直链: ${result.data[0].url.substring(0, 80)}...`);
     return result.data[0].url;
   }
+  
+  console.log('[网易云API] 未获取到歌曲直链，可能需要VIP或已下架');
   return null;
 }
 
@@ -210,13 +244,7 @@ exports.handler = async (event, context) => {
   const name = event.queryStringParameters?.name || `song_${songId}`;
   const artist = event.queryStringParameters?.artist || '';
   
-  if (!songId) {
-    return {
-      statusCode: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: '缺少 song_id 参数', code: 400 })
-    };
-  }
+  console.log(`[Handler] 开始处理请求: songId=${songId}, quality=${quality}, name=${name}`);
   
   try {
     // 获取音频直链
@@ -230,15 +258,17 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // 下载音频并流式返回
-    const audioResponse = await fetch(audioUrl, {
+    // 下载音频
+    console.log(`[Handler] 开始下载音频: ${audioUrl.substring(0, 80)}...`);
+    const audioResponse = await fetchWithTimeout(audioUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://music.163.com/'
       }
-    });
+    }, 20000); // 20秒超时（下载音频需要更长时间）
     
     if (!audioResponse.ok) {
+      console.error(`[Handler] 音频下载失败: HTTP ${audioResponse.status}`);
       return {
         statusCode: audioResponse.status,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -250,6 +280,8 @@ exports.handler = async (event, context) => {
     const arrayBuffer = await audioResponse.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     
+    console.log(`[Handler] 音频下载成功: ${buffer.length} 字节`);
+    
     const filename = `${name}${artist ? ' - ' + artist : ''}.mp3`;
     
     return {
@@ -259,7 +291,7 @@ exports.handler = async (event, context) => {
         'Content-Type': 'audio/mpeg',
         'Content-Length': buffer.length.toString(),
         'Content-Disposition': `inline; filename="${encodeURIComponent(filename)}"`,
-        'Cache-Control': 'public, max-age=86400', // 缓存24小时
+        'Cache-Control': 'public, max-age=86400',
         'Accept-Ranges': 'bytes'
       },
       body: buffer.toString('base64'),
@@ -267,7 +299,8 @@ exports.handler = async (event, context) => {
     };
     
   } catch (error) {
-    console.error('音频代理错误:', error);
+    console.error('[Handler] 服务器内部错误:', error.message);
+    console.error('[Handler] 错误堆栈:', error.stack);
     return {
       statusCode: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
