@@ -11,8 +11,45 @@
 
 const crypto = require('crypto');
 
-// 网易云 Cookie（优先从环境变量读取，未配置则使用默认值）
-const NETEASE_COOKIE = process.env.NETEASE_COOKIE || '00051F8B50B031D47D75138C419DF7B832B7454FEC68CE11935A6FF17E33543308BE6C3EA6689BAD40FFFB5F83B9F73030B0CE8EAB90EEDBE8A7362751F354AB290B5F2FF8C0DAD1FE3675FFCE7FD0C481A0A86A0A61DC5926ED9EA8D896C9330A2A59B281E880AD3066C5E5027695D2F2DD220636C9FE1186CFD84B1E3FBF6FD4D5C77FF8F533E7B2E6B5B3E3E6DCC7957BDA90BE2CDCBEAB4964499330D9C4FDD4E9EC548A8550EA9287E1613E9683B3A8CE3133A48B48D304E4146B4C10C898C7E6CC7539A623D99A823FEBCC8DE5CCFCAB9A75869500602A3B0DF793A7F776CA40AE6C7050A31806F1AC5CE816BC4E950A0DA1DE1EAA136CFDF3C6BAFB45EE58C3BCEE3D997D3764B7BBFD38EE07C562AB9057FCCBAC9749C56A010913A077B941E3A77BB46F39658FD90A7DFB6B3AC57E4C7C6480B1A57150A5E5D4995B2290F57E35CA9B48FFAD2572130007161047CCC5D582BEEBC83E313D296261A32C600D1398A21157C0B9E22F8046B51ADBA6582AA6B28EA505A3017EF7D70DD2EB61CB52C23E087085DC6FD5C0FD50A5594ACFE26B3F094FC3B30402BBA5938DC2';
+// ============================================================
+// Upstash Redis 配置（从环境变量读取，未配置则使用默认值）
+// ============================================================
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || 'https://normal-sawfly-40098.upstash.io';
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || 'AZyiAAIgcDEzM2UyZTZkM2Y2ODY0ZDY5YmM0MjFiYmUxYzEzODM0OA';
+
+// 内存缓存（减少 Upstash 查询次数，缓存 60 秒）
+let cachedCookie = '';
+let cachedCookieTime = 0;
+const CACHE_TTL = 60 * 1000; // 60秒
+
+// 从 Upstash 读取最新的 cookie
+async function getLatestCookie() {
+  const now = Date.now();
+  // 如果缓存未过期，直接返回缓存
+  if (cachedCookie && now - cachedCookieTime < CACHE_TTL) {
+    return cachedCookie;
+  }
+  
+  try {
+    const response = await fetch(`${UPSTASH_URL}/get/bot:cookie`, {
+      headers: {
+        'Authorization': `Bearer ${UPSTASH_TOKEN}`
+      }
+    });
+    const data = await response.json();
+    if (data && data.result) {
+      cachedCookie = data.result;
+      cachedCookieTime = now;
+      console.log('[Upstash] 成功读取最新 cookie，长度:', cachedCookie.length);
+      return cachedCookie;
+    }
+  } catch (e) {
+    console.error('[Upstash] 读取 cookie 失败，使用默认 cookie:', e.message);
+  }
+  
+  // 读取失败，返回默认 cookie
+  return process.env.NETEASE_COOKIE || '00051F8B50B031D47D75138C419DF7B832B7454FEC68CE11935A6FF17E33543308BE6C3EA6689BAD40FFFB5F83B9F73030B0CE8EAB90EEDBE8A7362751F354AB290B5F2FF8C0DAD1FE3675FFCE7FD0C481A0A86A0A61DC5926ED9EA8D896C9330A2A59B281E880AD3066C5E5027695D2F2DD220636C9FE1186CFD84B1E3FBF6FD4D5C77FF8F533E7B2E6B5B3E3E6DCC7957BDA90BE2CDCBEAB4964499330D9C4FDD4E9EC548A8550EA9287E1613E9683B3A8CE3133A48B48D304E4146B4C10C898C7E6CC7539A623D99A823FEBCC8DE5CCFCAB9A75869500602A3B0DF793A7F776CA40AE6C7050A31806F1AC5CE816BC4E950A0DA1DE1EAA136CFDF3C6BAFB45EE58C3BCEE3D997D3764B7BBFD38EE07C562AB9057FCCBAC9749C56A010913A077B941E3A77BB46F39658FD90A7DFB6B3AC57E4C7C6480B1A57150A5E5D4995B2290F57E35CA9B48FFAD2572130007161047CCC5D582BEEBC83E313D296261A32C600D1398A21157C0B9E22F8046B51ADBA6582AA6B28EA505A3017EF7D70DD2EB61CB52C23E087085DC6FD5C0FD50A5594ACFE26B3F094FC3B30402BBA5938DC2';
+}
 
 // 生成随机 NMTID
 function genNmtid() {
@@ -20,11 +57,12 @@ function genNmtid() {
 }
 const NMTID = genNmtid();
 
-// 构建 Cookie 头
-function getCookieHeader() {
+// 构建 Cookie 头（从 Upstash 读取最新 cookie）
+async function getCookieHeader() {
+  const cookie = await getLatestCookie();
   const cookies = [];
-  if (NETEASE_COOKIE) {
-    cookies.push(`MUSIC_U=${NETEASE_COOKIE}`);
+  if (cookie) {
+    cookies.push(`MUSIC_U=${cookie}`);
   }
   cookies.push('__remember_me=true');
   cookies.push(`NMTID=${NMTID}`);
@@ -97,13 +135,14 @@ async function getSongUrl(songId, quality = 'standard') {
   params.append('params', data.params);
   params.append('encSecKey', data.encSecKey);
   
+  const cookieHeader = await getCookieHeader();
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': 'https://music.163.com/',
-      'Cookie': getCookieHeader(),
+      'Cookie': cookieHeader,
       'Origin': 'https://music.163.com'
     },
     body: params.toString()
