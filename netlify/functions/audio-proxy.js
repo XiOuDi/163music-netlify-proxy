@@ -11,6 +11,26 @@
 
 const crypto = require('crypto');
 
+// 网易云 Cookie（从环境变量读取）
+const NETEASE_COOKIE = process.env.NETEASE_COOKIE || '';
+
+// 生成随机 NMTID
+function genNmtid() {
+  return crypto.randomBytes(16).toString('hex');
+}
+const NMTID = genNmtid();
+
+// 构建 Cookie 头
+function getCookieHeader() {
+  const cookies = [];
+  if (NETEASE_COOKIE) {
+    cookies.push(`MUSIC_U=${NETEASE_COOKIE}`);
+  }
+  cookies.push('__remember_me=true');
+  cookies.push(`NMTID=${NMTID}`);
+  return cookies.join('; ');
+}
+
 // ============================================================
 // weapi 加密（网易云API加密）
 // ============================================================
@@ -82,14 +102,14 @@ async function getSongUrl(songId, quality = 'standard') {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': 'https://music.163.com/'
+      'Referer': 'https://music.163.com/',
+      'Cookie': getCookieHeader(),
+      'Origin': 'https://music.163.com'
     },
     body: params.toString()
   });
   
   const result = await response.json();
-  console.log('[DEBUG] API response status:', response.status);
-  console.log('[DEBUG] API response body:', JSON.stringify(result).substring(0, 500));
   
   if (result.data && result.data[0] && result.data[0].url) {
     return result.data[0].url;
