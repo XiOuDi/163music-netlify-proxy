@@ -143,10 +143,87 @@ function weapi(data) {
 }
 
 // ============================================================
+// 音频直链缓存（Upstash + 内存双层缓存，避免重复调用网易云 API）
+// ============================================================
+
+// 内存缓存（减少 Upstash 查询次数，缓存 3 分钟）
+let cachedAudioUrls = {}; // {songId_quality: {url, time}}
+const AUDIO_URL_MEMORY_CACHE_TTL = 3 * 60 * 1000; // 3分钟
+
+// 从 Upstash 读取音频直链缓存
+async function getCachedAudioUrl(songId, quality) {
+  const cacheKey = `${songId}_${quality}`;
+  const now = Date.now();
+  
+  // 先检查内存缓存
+  if (cachedAudioUrls[cacheKey] && now - cachedAudioUrls[cacheKey].time < AUDIO_URL_MEMORY_CACHE_TTL) {
+    console.log(`[音频缓存] 内存缓存命中: ${cacheKey}`);
+    return cachedAudioUrls[cacheKey].url;
+  }
+  
+  // 从 Upstash 读取
+  try {
+    const redisKey = `audio_url:${songId}:${quality}`;
+    const response = await fetchWithTimeout(`${UPSTASH_URL}/get/${redisKey}`, {
+      headers: {
+        'Authorization': `Bearer ${UPSTASH_TOKEN}`
+      }
+    }, 3000); // 3秒超时
+    
+    if (!response.ok) {
+      console.log(`[音频缓存] Upstash HTTP 错误: ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    if (data && data.result && typeof data.result === 'string' && data.result.startsWith('http')) {
+      const url = data.result;
+      // 写入内存缓存
+      cachedAudioUrls[cacheKey] = { url, time: now };
+      console.log(`[音频缓存] Upstash 缓存命中: ${cacheKey}`);
+      return url;
+    }
+  } catch (e) {
+    console.error('[音频缓存] Upstash 读取失败:', e.message);
+  }
+  
+  return null;
+}
+
+// 缓存音频直链到 Upstash
+async function cacheAudioUrl(songId, quality, url) {
+  const cacheKey = `${songId}_${quality}`;
+  const now = Date.now();
+  
+  // 写入内存缓存
+  cachedAudioUrls[cacheKey] = { url, time: now };
+  
+  // 写入 Upstash（过期时间 10 分钟，网易云直链通常 20 分钟过期）
+  try {
+    const redisKey = `audio_url:${songId}:${quality}`;
+    const encodedUrl = encodeURIComponent(url);
+    await fetchWithTimeout(`${UPSTASH_URL}/set/${redisKey}/${encodedUrl}?EX=600`, {
+      headers: {
+        'Authorization': `Bearer ${UPSTASH_TOKEN}`
+      }
+    }, 3000); // 3秒超时
+    console.log(`[音频缓存] 已缓存到 Upstash: ${cacheKey} 过期时间=10分钟`);
+  } catch (e) {
+    console.error('[音频缓存] Upstash 写入失败:', e.message);
+  }
+}
+
+// ============================================================
 // 网易云 API 调用
 // ============================================================
 
 async function getSongUrl(songId, quality = 'standard') {
+  // 优先从缓存读取音频直链
+  const cachedUrl = await getCachedAudioUrl(songId, quality);
+  if (cachedUrl) {
+    return cachedUrl;
+  }
+  
   const url = 'https://music.163.com/weapi/song/enhance/player/url/v1';
   const data = weapi({
     ids: JSON.stringify([songId]),
@@ -182,8 +259,11 @@ async function getSongUrl(songId, quality = 'standard') {
   const result = await response.json();
   
   if (result.data && result.data[0] && result.data[0].url) {
-    console.log(`[网易云API] 成功获取歌曲直链: ${result.data[0].url.substring(0, 80)}...`);
-    return result.data[0].url;
+    const audioUrl = result.data[0].url;
+    console.log(`[网易云API] 成功获取歌曲直链: ${audioUrl.substring(0, 80)}...`);
+    // 异步缓存到 Upstash（不阻塞返回）
+    cacheAudioUrl(songId, quality, audioUrl).catch(e => console.error('[音频缓存] 异步缓存失败:', e.message));
+    return audioUrl;
   }
   
   console.log('[网易云API] 未获取到歌曲直链，可能需要VIP或已下架');
