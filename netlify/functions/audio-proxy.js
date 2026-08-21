@@ -88,6 +88,9 @@ async function getSongUrl(songId, quality = 'standard') {
   });
   
   const result = await response.json();
+  console.log('[DEBUG] API response status:', response.status);
+  console.log('[DEBUG] API response body:', JSON.stringify(result).substring(0, 500));
+  
   if (result.data && result.data[0] && result.data[0].url) {
     return result.data[0].url;
   }
