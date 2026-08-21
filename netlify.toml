@@ -2,6 +2,7 @@
 # 网易云音乐音频代理服务
 
 [build]
+  # 不需要构建，直接部署静态文件和函数
   command = "echo 'Netlify Functions 部署完成'"
   publish = "."
 
@@ -20,8 +21,7 @@
 
 # 函数配置
 [functions]
+  # 函数目录
   directory = "netlify/functions"
-  timeout = 10
-
-[functions."audio-proxy"]
-  timeout = 10
+  # 注意：Netlify Functions 免费版默认超时10秒，无需在配置中设置
+  # 如需修改超时，请在 Netlify Dashboard → Site settings → Functions 中设置
