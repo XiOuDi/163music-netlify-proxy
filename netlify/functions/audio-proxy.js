@@ -114,25 +114,39 @@ exports.handler = async (event, context) => {
     };
   }
   
-  // 健康检查
-  if (event.path === '/.netlify/functions/audio-proxy' && !event.queryStringParameters.song_id) {
-    // 从路径提取 song_id（如果配置了重写）
-    const pathMatch = event.path.match(/\/audio\/(\d+)/);
+  // 健壮的 song_id 提取逻辑
+  let songId = event.queryStringParameters?.song_id;
+  
+  // 从原始路径提取（Netlify 重写后 event.path 是函数路径，rawPath 可能是原始路径）
+  if (!songId) {
+    const rawPath = event.rawPath || event.path || '';
+    const pathMatch = rawPath.match(/\/audio\/(\d+)/);
     if (pathMatch) {
-      event.queryStringParameters.song_id = pathMatch[1];
-    } else {
-      return {
-        statusCode: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'ok', message: '网易云音乐音频代理服务运行中' })
-      };
+      songId = pathMatch[1];
     }
   }
   
-  const songId = event.queryStringParameters.song_id;
-  const quality = event.queryStringParameters.quality || 'standard';
-  const name = event.queryStringParameters.name || `song_${songId}`;
-  const artist = event.queryStringParameters.artist || '';
+  // 从 multiValueQueryStringParameters 提取（备用）
+  if (!songId && event.multiValueQueryStringParameters?.song_id) {
+    songId = event.multiValueQueryStringParameters.song_id[0];
+  }
+  
+  // 健康检查（无 song_id 时返回状态）
+  if (!songId) {
+    return {
+      statusCode: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        status: 'ok', 
+        message: '网易云音乐音频代理服务运行中',
+        usage: '/audio/{song_id}?quality=standard&name=xxx&artist=xxx'
+      })
+    };
+  }
+  
+  const quality = event.queryStringParameters?.quality || 'standard';
+  const name = event.queryStringParameters?.name || `song_${songId}`;
+  const artist = event.queryStringParameters?.artist || '';
   
   if (!songId) {
     return {
