@@ -124,14 +124,29 @@ function aesEncrypt(text, key) {
   return encrypted;
 }
 
+function modPow(base, exp, mod) {
+  // 快速幂算法：计算 (base^exp) % mod，避免产生巨大数
+  let result = 1n;
+  base = base % mod;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) {
+      result = (result * base) % mod;
+    }
+    exp = exp / 2n;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
 function rsaEncrypt(text) {
   // 反转文本
   const reversed = text.split('').reverse().join('');
   const hex = Buffer.from(reversed, 'utf8').toString('hex');
-  let num = BigInt('0x' + hex);
-  num = num.modPow(RSA_EXP, RSA_PUB_KEY);
+  const num = BigInt('0x' + hex);
+  // 使用快速幂算法计算模幂（原生 BigInt 没有 modPow 方法）
+  const result = modPow(num, RSA_EXP, RSA_PUB_KEY);
   // 转256位十六进制字符串
-  return num.toString(16).padStart(256, '0');
+  return result.toString(16).padStart(256, '0');
 }
 
 function weapi(data) {
